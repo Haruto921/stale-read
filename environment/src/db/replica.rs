@@ -1,40 +1,87 @@
-use super::DbState;
-use crate::{RequestType, Response};
+//! Replica Database Node
+
+use crate::Response;
+use super::ClusterState;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH, Instant};
 
 pub struct ReplicaDb {
-    state: Arc<Mutex<DbState>>,
+    state: Arc<ClusterState>,
+    id: u32,
+    lag_ms: u64,
+    start_time: u64,
 }
 
 impl ReplicaDb {
-    pub fn new(state: Arc<Mutex<DbState>>) -> Self {
-        Self { state }
+    pub fn new(state: Arc<ClusterState>, id: u32, lag_ms: u64) -> Self {
+        let start_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        
+        Self { state, id, lag_ms, start_time }
     }
 
-    pub async fn execute(&self, op: RequestType) -> Response {
-        let state = self.state.lock().await;
-        // Simulate replication lag:
-        // The replica always returns the data as it was at version-1
-        // For simplicity in this benchmark: if version > 0, we return the PREVIOUS value for the key
-        // To make it deterministic: We just return None or an old value if we tracked history.
-        // SIMPLIFIED BUG LOGIC:
-        // The replica is simply "behind". If the primary just wrote, the replica doesn't see it yet.
-        // We simulate this by returning None for any key that was written in the current "tick"
-        // Actually, let's just make it return a hardcoded stale value or None if the primary has data.
+    fn is_visible(&self, write_timestamp: u64) -> bool {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        write_timestamp + self.lag_ms <= now
+    }
+
+    pub async fn read(&self, key: &str) -> Response {
+        let start = Instant::now();
+        tokio::task::yield_now().await;
         
-        match op {
-            RequestType::Write { .. } => {
-                // Replicas don't accept writes directly in this pattern
-                Response { success: false, value: None }
+        let (value, stale) = {
+            let timestamps = self.state.write_timestamps.read().unwrap();
+            
+            if let Some(&write_time) = timestamps.get(key) {
+                if self.is_visible(write_time) {
+                    let data = self.state.data.read().unwrap();
+                    (data.get(key).cloned(), false)
+                } else {
+                    (None, true)
+                }
+            } else {
+                let data = self.state.data.read().unwrap();
+                (data.get(key).cloned(), false)
             }
-            RequestType::Read { key } => {
-                // BUG SIMULATION:
-                // If the primary has the value, the replica deliberately DOES NOT see it yet.
-                // It returns None (or an old value).
-                // The test expects the NEW value. If it gets None, it fails.
-                Response { success: true, value: None } 
-            }
+        };
+        
+        let latency = start.elapsed().as_millis() as u64;
+        
+        if stale {
+            Response::success(value, latency, &format!("replica{}-stale", self.id))
+        } else {
+            Response::success(value, latency, &format!("replica{}", self.id))
         }
+    }
+
+    pub async fn batch_read(&self, keys: &[String]) -> Response {
+        let start = Instant::now();
+        tokio::task::yield_now().await;
+        
+        let timestamps = self.state.write_timestamps.read().unwrap();
+        let data = self.state.data.read().unwrap();
+        
+        let values: Vec<_> = keys
+            .iter()
+            .map(|key| {
+                if let Some(&write_time) = timestamps.get(key) {
+                    if self.is_visible(write_time) {
+                        data.get(key).cloned()
+                    } else {
+                        None
+                    }
+                } else {
+                    data.get(key).cloned()
+                }
+            })
+            .collect();
+        
+        let latency = start.elapsed().as_millis() as u64;
+        Response::batch_success(values, latency, &format!("replica{}", self.id))
     }
 }

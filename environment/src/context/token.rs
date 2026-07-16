@@ -1,20 +1,3 @@
-#!/bin/bash
-# Solution Script for Stale Read Fix
-# 
-# The bug: The TokenManager uses thread_local storage which doesn't
-# survive async task migration.
-#
-# The fix: Store the token directly in the RequestContext struct.
-
-set -euo pipefail
-
-cd /workspace/project/stale-read-hard/environment
-
-echo "=== Stale Read Fix - Applying Solution ==="
-
-# Fix the token manager to use struct-based storage instead of thread_local
-
-cat > src/context/token.rs << 'EOF'
 //! Token Manager
 //! 
 //! This module manages the consistency token that tracks whether a write
@@ -78,14 +61,3 @@ mod tests {
         assert!(manager.get_token().is_none());
     }
 }
-EOF
-
-echo "Fixed: Replaced thread_local storage with struct-based Arc<Mutex<...>>"
-
-echo ""
-echo "=== Running Tests ==="
-cargo test --test integration_test --release -- --nocapture
-
-echo ""
-echo "=== All Tests Passed ==="
-echo "The read-your-writes consistency bug has been fixed."

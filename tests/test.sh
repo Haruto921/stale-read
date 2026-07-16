@@ -1,16 +1,9 @@
 #!/bin/bash
-set -euo pipefail
+set -e
 
-cd /app
+cd "$(dirname "$0")/../environment"
 
-# Initialize the database singleton if needed (handled in test, but good practice)
-# Run the specific integration test
-# We capture the exit code of cargo test
-cargo test --test integration_test test_read_your_writes --release -- --nocapture
-rc=$?
+export PATH="/usr/local/cargo/bin:$PATH"
 
-if [ "$rc" -eq 0 ]; then
-    echo 1 > /logs/verifier/reward.txt
-else
-    echo 0 > /logs/verifier/reward.txt
-fi
+echo "=== Running Integration Tests ==="
+cargo test --test integration_test --release -- --nocapture
