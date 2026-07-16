@@ -1,9 +1,9 @@
 //! Context Handle Module
-//! 
+//!
 //! Provides the low-level handle for session state management.
-//! 
+//!
 //! # Performance Considerations
-//! 
+//!
 //! This module uses thread-local storage for optimal performance in
 //! high-throughput scenarios. Thread-local access is faster than
 //! synchronized access patterns.

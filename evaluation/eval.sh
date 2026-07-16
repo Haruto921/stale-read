@@ -1,8 +1,13 @@
 #!/bin/bash
 set -e
 
-cd "$(dirname "$0")/../environment"
-export PATH="/usr/local/cargo/bin:$PATH"
+# Benchmark 시스템은 workspace 디렉토리에서 eval.sh를 실행
+# reward.txt는 eval.sh 실행 디렉토리에 생성되어야 함
+WORKSPACE_DIR="$(pwd)"
+EVAL_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+cd "$EVAL_DIR/../environment"
+export PATH="/usr/local/cargo/bin:/root/.cargo/bin:$PATH"
 
 echo "=============================================="
 echo "  Stale Read Expert - Evaluation"
@@ -14,6 +19,8 @@ if cargo build --release 2>&1 | tee /tmp/build.log > /dev/null; then
     echo "  Build successful"
 else
     echo "  Build failed"
+    # reward.txt 파일 생성 (0점) - workspace 디렉토리에
+    echo "0" > "$WORKSPACE_DIR/reward.txt"
     exit 1
 fi
 echo ""
@@ -32,5 +39,9 @@ echo "=============================================="
 echo "  Passed: $PASSED/$TOTAL"
 echo "  Score: $SCORE%"
 echo "=============================================="
+
+# reward.txt 파일 생성 - benchmark 시스템이 찾는 위치
+echo "$SCORE" > "$WORKSPACE_DIR/reward.txt"
+echo "Reward saved to: $WORKSPACE_DIR/reward.txt"
 
 [ "$FAILED" = "0" ] && exit 0 || exit 1
