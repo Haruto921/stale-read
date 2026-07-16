@@ -1,27 +1,17 @@
-version = "2.0"
+[benchmark]
+name = "stale-read-expert"
+difficulty = "expert"
+time_limit_minutes = 60
 
-[metadata]
-author_name = "Terminal-Bench Architect"
-author_email = "architect@terminal-bench.org"
-difficulty = "unknown"
-category = "db_interaction"
-subcategories = []
-number_of_milestones = 0
-codebase_size = "small"
-languages = ["rust"]
-tags = ["async", "tokio", "consistency", "debugging", "concurrency"]
-expert_time_estimate_min = 45
-junior_time_estimate_min = 180
+[author]
+name = "Haruto921"
 
-[verifier]
-timeout_sec = 120
-
-[agent]
-timeout_sec = 600
+[grading]
+passing_score = 100
+partial_credit = false
 
 [environment]
-build_timeout_sec = 300
-cpus = 2
-memory_mb = 2048
-storage_mb = 512
-allow_internet = false
+language = "Rust"
+framework = "Tokio"
+build_command = "cargo build --release"
+test_command = "cargo test --release"
