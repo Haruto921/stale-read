@@ -1,63 +1,84 @@
-//! Session Context Management
-//! 
-//! This module provides the request context for session-consistent routing.
+pub mod handle;
+pub mod vault;
 
-pub mod storage;
-pub mod token;
+pub use handle::ContextHandle;
 
-use std::sync::Arc;
+/// Maximum number of active sessions
+const MAX_SESSIONS: usize = 10_000;
 
-/// Request context for session consistency
-/// 
-/// This struct provides the interface for managing session-scoped state.
+/// Session context for routing decisions
 #[derive(Clone)]
-pub struct RequestContext {
-    /// Internal storage handle
-    inner: Arc<ContextInner>,
+pub struct SessionContext {
+    /// Internal handle
+    handle: ContextHandle,
+    /// Session ID
+    session_id: u64,
 }
 
-/// Internal context storage
-struct ContextInner {
-    /// The token manager
-    token_manager: token::TokenManager,
-}
-
-impl RequestContext {
-    /// Create a new request context
+impl SessionContext {
+    /// Create a new session context
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(ContextInner {
-                token_manager: token::TokenManager::new(),
-            }),
+            handle: ContextHandle::new(),
+            session_id: Self::generate_session_id(),
         }
     }
 
-    /// Set the consistency token after a write operation
-    /// 
-    /// When a token is set, subsequent reads will be routed to the primary
-    /// to ensure read-your-writes consistency.
-    pub fn set_token(&self, token: u64) {
-        self.inner.token_manager.set_token(token);
+    /// Generate a unique session ID
+    fn generate_session_id() -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64
     }
 
-    /// Get the current consistency token
-    pub fn get_token(&self) -> Option<u64> {
-        self.inner.token_manager.get_token()
+    /// Get the session ID
+    pub fn id(&self) -> u64 {
+        self.session_id
     }
 
-    /// Clear the consistency token
-    pub fn clear_token(&self) {
-        self.inner.token_manager.clear();
-    }
-
-    /// Check if primary routing is required
+    /// Check if this session requires primary routing
     pub fn requires_primary(&self) -> bool {
-        self.get_token().is_some()
+        self.handle.requires_primary()
+    }
+
+    /// Set the primary requirement flag
+    pub fn set_requires_primary(&self, value: bool) {
+        self.handle.set_requires_primary(value)
+    }
+
+    /// Record that a write occurred in this session
+    pub fn record_write(&self) {
+        self.handle.record_write()
+    }
+
+    /// Check if any writes occurred in this session
+    pub fn has_writes(&self) -> bool {
+        self.handle.has_writes()
     }
 }
 
-impl Default for RequestContext {
+impl Default for SessionContext {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_session_creation() {
+        let ctx = SessionContext::new();
+        assert!(!ctx.requires_primary());
+    }
+
+    #[test]
+    fn test_session_id_unique() {
+        let ctx1 = SessionContext::new();
+        let ctx2 = SessionContext::new();
+        assert_ne!(ctx1.id(), ctx2.id());
     }
 }

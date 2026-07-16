@@ -1,91 +1,60 @@
 #!/bin/bash
-# Solution Script for Stale Read Fix
-# 
-# The bug: The TokenManager uses thread_local storage which doesn't
-# survive async task migration.
-#
-# The fix: Store the token directly in the RequestContext struct.
+# Solution for Stale Read Expert
+# Bug: thread_local storage in ContextHandle doesn't persist across task migration
+# Fix: Use Arc<Mutex<>> instead of thread_local
 
 set -euo pipefail
 
-cd /workspace/project/stale-read-hard/environment
+cd "$(dirname "$0")/../environment"
 
-echo "=== Stale Read Fix - Applying Solution ==="
+echo "=== Stale Read Expert - Applying Fix ==="
 
-# Fix the token manager to use struct-based storage instead of thread_local
-
-cat > src/context/token.rs << 'EOF'
-//! Token Manager
-//! 
-//! This module manages the consistency token that tracks whether a write
-//! has occurred in the current session.
-
+cat > src/context/handle.rs << 'EOF'
 use std::sync::{Arc, Mutex};
 
-/// Token manager for consistency tracking
-/// 
-/// This stores the token directly in the struct, not in thread-local storage.
-/// This ensures the token persists across async task migration.
-pub struct TokenManager {
-    /// The consistency token
-    token: Arc<Mutex<Option<u64>>>,
+#[derive(Default, Clone)]
+pub struct ContextState {
+    pub requires_primary: bool,
+    pub has_writes: bool,
 }
 
-impl TokenManager {
-    /// Create a new token manager
+#[derive(Default, Clone)]
+pub struct ContextHandle {
+    state: Arc<Mutex<ContextState>>,
+}
+
+impl ContextHandle {
     pub fn new() -> Self {
         Self {
-            token: Arc::new(Mutex::new(None)),
+            state: Arc::new(Mutex::new(ContextState::default())),
         }
     }
 
-    /// Set the consistency token
-    pub fn set_token(&self, token: u64) {
-        *self.token.lock().unwrap() = Some(token);
+    pub fn requires_primary(&self) -> bool {
+        self.state.lock().unwrap().requires_primary
     }
 
-    /// Get the current token
-    pub fn get_token(&self) -> Option<u64> {
-        *self.token.lock().unwrap()
+    pub fn set_requires_primary(&self, value: bool) {
+        self.state.lock().unwrap().requires_primary = value;
     }
 
-    /// Clear the token
-    pub fn clear(&self) {
-        *self.token.lock().unwrap() = None;
+    pub fn record_write(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.has_writes = true;
+        state.requires_primary = true;
     }
-}
 
-impl Default for TokenManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_token_basic() {
-        let manager = TokenManager::new();
-        
-        assert!(manager.get_token().is_none());
-        
-        manager.set_token(12345);
-        assert_eq!(manager.get_token(), Some(12345));
-        
-        manager.clear();
-        assert!(manager.get_token().is_none());
+    pub fn has_writes(&self) -> bool {
+        self.state.lock().unwrap().has_writes
     }
 }
 EOF
 
-echo "Fixed: Replaced thread_local storage with struct-based Arc<Mutex<...>>"
+echo "Fixed: Replaced thread_local with Arc<Mutex<ContextState>>"
 
 echo ""
 echo "=== Running Tests ==="
-cargo test --test integration_test --release -- --nocapture
+cargo test --test integration_test --release -- --test-threads=1 --nocapture
 
 echo ""
 echo "=== All Tests Passed ==="
-echo "The read-your-writes consistency bug has been fixed."

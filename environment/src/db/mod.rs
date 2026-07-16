@@ -1,82 +1,120 @@
-//! Database Cluster
-//! 
-//! Simulated primary-replica database cluster with configurable replication lag.
+//! Database Module
 
 pub mod primary;
 pub mod replica;
 
-use crate::RequestType;
+use once_cell::sync::Lazy;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::sync::RwLock;
+use tokio::task;
+use std::time::Duration;
 
-/// Database cluster
-pub struct Cluster {
-    primary: Arc<primary::PrimaryDb>,
-    replicas: Vec<Arc<replica::ReplicaDb>>,
+#[derive(Debug, Clone)]
+pub enum RequestType {
+    Read { key: String },
+    Write { key: String, value: String },
+    Delete { key: String },
 }
 
-/// Shared cluster state
-pub struct ClusterState {
-    pub data: RwLock<HashMap<String, String>>,
-    pub write_timestamps: RwLock<HashMap<String, u64>>,
+#[derive(Debug, Clone)]
+pub struct Response {
+    pub success: bool,
+    pub value: Option<String>,
+    pub node: String,
+    pub latency_ms: u64,
 }
 
-impl Cluster {
-    pub fn new(replication_lag_ms: u64) -> Self {
-        let state = Arc::new(ClusterState {
-            data: RwLock::new(HashMap::new()),
-            write_timestamps: RwLock::new(HashMap::new()),
-        });
+/// Global primary storage
+static PRIMARY_DATA: Lazy<RwLock<HashMap<String, String>>> = Lazy::new(|| {
+    RwLock::new(HashMap::new())
+});
 
-        let primary = Arc::new(primary::PrimaryDb::new(state.clone()));
-        let replicas: Vec<_> = (0..2)
-            .map(|i| Arc::new(replica::ReplicaDb::new(state.clone(), i as u32, replication_lag_ms)))
-            .collect();
+/// Global replica storage (simulated with lag)
+static REPLICA_DATA: Lazy<RwLock<HashMap<String, String>>> = Lazy::new(|| {
+    RwLock::new(HashMap::new())
+});
 
-        Self { primary, replicas }
-    }
+/// Initialize the database cluster
+pub fn init_cluster() {
+    let mut primary = PRIMARY_DATA.write().unwrap();
+    primary.clear();
+    primary.insert("init:key".to_string(), "init:value".to_string());
+    
+    let mut replica = REPLICA_DATA.write().unwrap();
+    replica.clear();
+    replica.insert("init:key".to_string(), "init:value".to_string());
+}
 
-    pub async fn execute(&self, req: RequestType, use_primary: bool) -> crate::Response {
-        match req {
-            RequestType::Write { key, value } => self.primary.write(key, value).await,
-            RequestType::Read { key } => {
-                if use_primary {
-                    self.primary.read(&key).await
-                } else {
-                    let idx = rand_idx(self.replicas.len());
-                    self.replicas[idx].read(&key).await
-                }
-            }
-            RequestType::BatchRead { keys } => {
-                if use_primary {
-                    self.primary.batch_read(&keys).await
-                } else {
-                    let idx = rand_idx(self.replicas.len());
-                    self.replicas[idx].batch_read(&keys).await
-                }
-            }
-            RequestType::Invalidate { key } => self.primary.invalidate(&key).await,
+/// Route a write to primary
+pub async fn route_to_primary(request: RequestType) -> (bool, Option<String>) {
+    match request {
+        RequestType::Write { key, value } => {
+            let mut data = PRIMARY_DATA.write().unwrap();
+            data.insert(key.clone(), value);
+            
+            // Simulate async replication with lag
+            let key_clone = key.clone();
+            let value_clone = data.get(&key).cloned().unwrap_or_default();
+            drop(data);
+            
+            // Replicate asynchronously
+            task::spawn_blocking(move || {
+                // Simulate 50ms replication lag
+                std::thread::sleep(Duration::from_millis(50));
+                
+                let mut replica = REPLICA_DATA.write().unwrap();
+                replica.insert(key_clone, value_clone);
+            });
+            
+            (true, None)
+        }
+        RequestType::Read { key } => {
+            let data = PRIMARY_DATA.read().unwrap();
+            let value = data.get(&key).cloned();
+            (true, value)
+        }
+        RequestType::Delete { key } => {
+            let mut data = PRIMARY_DATA.write().unwrap();
+            data.remove(&key);
+            
+            // Async delete replication
+            let key_clone = key.clone();
+            drop(data);
+            
+            task::spawn_blocking(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                let mut replica = REPLICA_DATA.write().unwrap();
+                replica.remove(&key_clone);
+            });
+            
+            (true, None)
         }
     }
 }
 
-static mut CLUSTER: Option<Cluster> = None;
-
-pub fn init_cluster() {
-    unsafe {
-        CLUSTER = Some(Cluster::new(50));
+/// Route a read to replica
+pub async fn route_to_replica(request: RequestType) -> (bool, Option<String>) {
+    match request {
+        RequestType::Read { key } => {
+            // Use blocking read to simulate replica latency
+            let key_clone = key.clone();
+            let result = task::spawn_blocking(move || {
+                let data = REPLICA_DATA.read().unwrap();
+                data.get(&key_clone).cloned()
+            }).await;
+            
+            match result {
+                Ok(value) => (true, value),
+                Err(_) => (false, None),
+            }
+        }
+        _ => (false, None),
     }
 }
 
-pub fn get_cluster() -> &'static Cluster {
-    unsafe {
-        CLUSTER.as_ref().expect("Cluster not initialized")
-    }
-}
-
-fn rand_idx(max: usize) -> usize {
-    use std::time::SystemTime;
-    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap();
-    (now.subsec_nanos() as usize) % max
+/// Force replica sync (for testing)
+pub fn sync_replica() {
+    let primary = PRIMARY_DATA.read().unwrap();
+    let mut replica = REPLICA_DATA.write().unwrap();
+    *replica = primary.clone();
 }

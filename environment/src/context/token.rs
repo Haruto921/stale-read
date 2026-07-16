@@ -2,15 +2,13 @@
 //! 
 //! This module manages the consistency token that tracks whether a write
 //! has occurred in the current session.
+//! 
+//! FIX: Changed from thread_local to Arc-based storage for cross-thread persistence.
 
 use std::sync::{Arc, Mutex};
 
 /// Token manager for consistency tracking
-/// 
-/// This stores the token directly in the struct, not in thread-local storage.
-/// This ensures the token persists across async task migration.
 pub struct TokenManager {
-    /// The consistency token
     token: Arc<Mutex<Option<u64>>>,
 }
 

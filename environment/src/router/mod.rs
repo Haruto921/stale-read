@@ -1,65 +1,130 @@
-//! Request Router
+//! Request Router Module
 //! 
-//! This module handles request routing to the appropriate database node.
+//! Routes database requests to appropriate nodes based on session state.
+//! 
+//! # Routing Logic
+//! 
+//! The router examines the session context to determine whether to route
+//! requests to the primary or replica nodes:
+//! 
+//! - Write operations always go to primary
+//! - Read operations go to primary if session requires it
+//! - Otherwise, reads go to replica for load distribution
 
-use crate::{RequestType, Response, db::get_cluster, context::RequestContext};
+use crate::{RequestType, Response, SessionContext, db};
+use std::time::Instant;
 
-/// Handle a database request
-/// 
-/// Routes requests based on:
-/// - Request type (writes always go to primary)
-/// - Consistency token (if set, reads go to primary)
-pub async fn handle_request(req: RequestType, ctx: &RequestContext) -> Response {
-    match req {
-        RequestType::Write { key, value } => {
-            let resp = get_cluster().execute(
-                RequestType::Write { key, value }, 
-                true
-            ).await;
-            
-            // Set consistency token on successful write
-            if resp.success {
-                let token = generate_token();
-                ctx.set_token(token);
+/// Route decision
+#[derive(Debug, Clone, PartialEq)]
+pub enum RouteDecision {
+    Primary,
+    Replica,
+    Error(String),
+}
+
+/// Handle a request with routing
+pub async fn handle_request(
+    request: RequestType,
+    session: &SessionContext,
+) -> Response {
+    let decision = decide_route(&request, session);
+    
+    match decision {
+        RouteDecision::Primary => {
+            let start = Instant::now();
+            let result = db::route_to_primary(request).await;
+            let elapsed = start.elapsed().as_millis() as u64;
+            Response {
+                success: result.0,
+                value: result.1,
+                node: "primary".to_string(),
+                latency_ms: elapsed,
             }
-            
-            resp
         }
-        RequestType::Read { key } => {
-            let use_primary = ctx.requires_primary();
-            
-            get_cluster().execute(
-                RequestType::Read { key },
-                use_primary
-            ).await
+        RouteDecision::Replica => {
+            let start = Instant::now();
+            let result = db::route_to_replica(request).await;
+            let elapsed = start.elapsed().as_millis() as u64;
+            Response {
+                success: result.0,
+                value: result.1,
+                node: "replica".to_string(),
+                latency_ms: elapsed,
+            }
         }
-        RequestType::BatchRead { keys } => {
-            let use_primary = ctx.requires_primary();
-            
-            get_cluster().execute(
-                RequestType::BatchRead { keys },
-                use_primary
-            ).await
-        }
-        RequestType::Invalidate { key } => {
-            get_cluster().execute(
-                RequestType::Invalidate { key },
-                false
-            ).await
+        RouteDecision::Error(msg) => {
+            Response {
+                success: false,
+                value: None,
+                node: "error".to_string(),
+                latency_ms: 0,
+            }
         }
     }
 }
 
-/// Generate a unique consistency token
-fn generate_token() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as u64;
-    
-    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-    now.wrapping_mul(31).wrapping_add(counter)
+/// Decide which node to route to
+fn decide_route(request: &RequestType, session: &SessionContext) -> RouteDecision {
+    match request {
+        // Writes always go to primary
+        RequestType::Write { .. } => {
+            session.record_write();
+            RouteDecision::Primary
+        }
+        RequestType::Delete { .. } => {
+            session.record_write();
+            RouteDecision::Primary
+        }
+        // Reads go to primary if session requires it
+        RequestType::Read { .. } => {
+            if session.requires_primary() {
+                RouteDecision::Primary
+            } else {
+                RouteDecision::Replica
+            }
+        }
+    }
+}
+
+/// Route statistics for monitoring
+pub struct RouterStats {
+    pub primary_routes: u64,
+    pub replica_routes: u64,
+    pub errors: u64,
+}
+
+impl RouterStats {
+    pub fn new() -> Self {
+        Self {
+            primary_routes: 0,
+            replica_routes: 0,
+            errors: 0,
+        }
+    }
+
+    pub fn record_primary(&mut self) {
+        self.primary_routes += 1;
+    }
+
+    pub fn record_replica(&mut self) {
+        self.replica_routes += 1;
+    }
+
+    pub fn record_error(&mut self) {
+        self.errors += 1;
+    }
+
+    pub fn primary_ratio(&self) -> f64 {
+        let total = self.primary_routes + self.replica_routes;
+        if total == 0 {
+            return 0.0;
+        }
+        self.primary_routes as f64 / total as f64
+    }
+}
+
+impl Default for RouterStats {
+    fn default() -> Self {
+        Self::new()
+    }
 }
